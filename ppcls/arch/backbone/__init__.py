@@ -63,6 +63,7 @@ from ppcls.arch.backbone.model_zoo.cspnet import CSPDarkNet53
 from ppcls.arch.backbone.variant_models.resnet_variant import ResNet50_last_stage_stride1
 from ppcls.arch.backbone.variant_models.vgg_variant import VGG19Sigmoid
 from ppcls.arch.backbone.variant_models.pp_lcnet_variant import PPLCNet_x2_5_Tanh
+from ppcls.arch.backbone.model_zoo.octmobilenet_v2 import OctMobileNet_v2_100, OctMobileNet_v2_1125
 
 
 # help whl get all the models' api (class type) and components' api (func type)
