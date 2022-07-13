@@ -16,9 +16,66 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from paddle import optimizer as optim
+import inspect
 
+from paddle import optimizer as optim
 from ppcls.utils import logger
+
+
+class SGD(object):
+    """
+    Args:
+    learning_rate (float|Tensor|LearningRateDecay, optional): The learning rate used to update ``Parameter``.
+        It can be a float value, a ``Tensor`` with a float type or a LearningRateDecay. The default value is 0.001.
+    parameters (list|tuple, optional): List/Tuple of ``Tensor`` to update to minimize ``loss``. \
+        This parameter is required in dygraph mode. \
+        The default value is None in static mode, at this time all parameters will be updated.
+    weight_decay (float|WeightDecayRegularizer, optional): The strategy of regularization. \
+        It canbe a float value as coeff of L2 regularization or \
+        :ref:`api_fluid_regularizer_L1Decay`, :ref:`api_fluid_regularizer_L2Decay`.
+        If a parameter has set regularizer using :ref:`api_fluid_ParamAttr` already, \
+        the regularization setting here in optimizer will be ignored for this parameter. \
+        Otherwise, the regularization setting here in optimizer will take effect. \
+        Default None, meaning there is no regularization.
+    grad_clip (GradientClipBase, optional): Gradient cliping strategy, it's an instance of
+        some derived class of ``GradientClipBase`` . There are three cliping strategies
+        ( :ref:`api_fluid_clip_GradientClipByGlobalNorm` , :ref:`api_fluid_clip_GradientClipByNorm` ,
+        :ref:`api_fluid_clip_GradientClipByValue` ). Default None, meaning there is no gradient clipping.
+    name (str, optional): The default value is None. Normally there is no need for user
+            to set this property.
+    """
+
+    def __init__(self,
+                 learning_rate=0.001,
+                 weight_decay=None,
+                 grad_clip=None,
+                 multi_precision=False,
+                 name=None):
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.grad_clip = grad_clip
+        self.multi_precision = multi_precision
+        self.name = name
+
+    def __call__(self, model_list):
+        # model_list is None in static graph
+        parameters = sum([m.parameters() for m in model_list],
+                         []) if model_list else None
+        argspec = inspect.getargspec(optim.SGD.__init__).args
+        if 'multi_precision' in argspec:
+            opt = optim.SGD(learning_rate=self.learning_rate,
+                            parameters=parameters,
+                            weight_decay=self.weight_decay,
+                            grad_clip=self.grad_clip,
+                            multi_precision=self.multi_precision,
+                            name=self.name)
+        else:
+            opt = optim.SGD(learning_rate=self.learning_rate,
+                            parameters=parameters,
+                            weight_decay=self.weight_decay,
+                            grad_clip=self.grad_clip,
+                            name=self.name)
+        return opt
 
 
 class Momentum(object):
@@ -36,7 +93,7 @@ class Momentum(object):
                  momentum,
                  weight_decay=None,
                  grad_clip=None,
-                 multi_precision=False):
+                 multi_precision=True):
         super().__init__()
         self.learning_rate = learning_rate
         self.momentum = momentum
@@ -55,6 +112,15 @@ class Momentum(object):
             grad_clip=self.grad_clip,
             multi_precision=self.multi_precision,
             parameters=parameters)
+        if hasattr(opt, '_use_multi_tensor'):
+            opt = optim.Momentum(
+                learning_rate=self.learning_rate,
+                momentum=self.momentum,
+                weight_decay=self.weight_decay,
+                grad_clip=self.grad_clip,
+                multi_precision=self.multi_precision,
+                parameters=parameters,
+                use_multi_tensor=True)
         return opt
 
 
@@ -187,8 +253,9 @@ class AdamW(object):
 
         if self.one_dim_param_no_weight_decay:
             self.no_weight_decay_param_name_list += [
-                p.name for model in model_list
-                for n, p in model.named_parameters() if len(p.shape) == 1
+                p.name
+                for model in model_list for n, p in model.named_parameters()
+                if len(p.shape) == 1
             ] if model_list else []
 
         opt = optim.AdamW(

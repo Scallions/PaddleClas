@@ -27,19 +27,24 @@ from ppcls.arch.backbone.base.theseus_layer import TheseusLayer
 from ppcls.utils import logger
 from ppcls.utils.save_load import load_dygraph_pretrain
 from ppcls.arch.slim import prune_model, quantize_model
+from ppcls.arch.distill.afd_attention import LinearTransformStudent, LinearTransformTeacher
+
+__all__ = ["build_model", "RecModel", "DistillationModel", "AttentionModel"]
 
 
-__all__ = ["build_model", "RecModel", "DistillationModel"]
-
-
-def build_model(config):
+def build_model(config, mode="train"):
     arch_config = copy.deepcopy(config["Arch"])
     model_type = arch_config.pop("name")
+    use_sync_bn = arch_config.pop("use_sync_bn", False)
     mod = importlib.import_module(__name__)
     arch = getattr(mod, model_type)(**arch_config)
+    if use_sync_bn:
+        arch = nn.SyncBatchNorm.convert_sync_batchnorm(arch)
+
     if isinstance(arch, TheseusLayer):
         prune_model(config, arch)
-        quantize_model(config, arch)
+        quantize_model(config, arch, mode)
+
     return arch
 
 
@@ -50,6 +55,7 @@ def apply_to_static(config, model):
         specs = None
         if 'image_shape' in config['Global']:
             specs = [InputSpec([None] + config['Global']['image_shape'])]
+            specs[0].stop_gradient = True
         model = to_static(model, input_spec=specs)
         logger.info("Successfully to apply @to_static with specs: {}".format(
             specs))
@@ -77,14 +83,17 @@ class RecModel(TheseusLayer):
             self.head = None
 
     def forward(self, x, label=None):
+        out = dict()
         x = self.backbone(x)
+        out["backbone"] = x
         if self.neck is not None:
             x = self.neck(x)
+            out["neck"] = x
+        out["features"] = x
         if self.head is not None:
             y = self.head(x, label)
-        else:
-            y = None
-        return {"features": x, "logits": y}
+            out["logits"] = y
+        return out
 
 
 class DistillationModel(nn.Layer):
@@ -129,4 +138,25 @@ class DistillationModel(nn.Layer):
                 result_dict[model_name] = self.model_list[idx](x)
             else:
                 result_dict[model_name] = self.model_list[idx](x, label)
+        return result_dict
+
+
+class AttentionModel(DistillationModel):
+    def __init__(self,
+                 models=None,
+                 pretrained_list=None,
+                 freeze_params_list=None,
+                 **kargs):
+        super().__init__(models, pretrained_list, freeze_params_list, **kargs)
+
+    def forward(self, x, label=None):
+        result_dict = dict()
+        out = x
+        for idx, model_name in enumerate(self.model_name_list):
+            if label is None:
+                out = self.model_list[idx](out)
+                result_dict.update(out)
+            else:
+                out = self.model_list[idx](out, label)
+                result_dict.update(out)
         return result_dict

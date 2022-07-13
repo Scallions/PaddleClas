@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# reference: https://arxiv.org/abs/1704.04861
+
 from __future__ import absolute_import, division, print_function
 
 from paddle import ParamAttr
@@ -32,6 +34,10 @@ MODEL_URLS = {
     "https://paddle-imagenet-models-name.bj.bcebos.com/dygraph/legendary_models/MobileNetV1_x0_75_pretrained.pdparams",
     "MobileNetV1":
     "https://paddle-imagenet-models-name.bj.bcebos.com/dygraph/legendary_models/MobileNetV1_pretrained.pdparams"
+}
+
+MODEL_STAGES_PATTERN = {
+    "MobileNetV1": ["blocks[0]", "blocks[2]", "blocks[4]", "blocks[10]"]
 }
 
 __all__ = MODEL_URLS.keys()
@@ -102,7 +108,12 @@ class MobileNet(TheseusLayer):
         model: nn.Layer. Specific MobileNet model depends on args.
     """
 
-    def __init__(self, scale=1.0, class_num=1000, return_patterns=None):
+    def __init__(self,
+                 stages_pattern,
+                 scale=1.0,
+                 class_num=1000,
+                 return_patterns=None,
+                 return_stages=None):
         super().__init__()
         self.scale = scale
 
@@ -128,7 +139,7 @@ class MobileNet(TheseusLayer):
                     [int(512 * scale), 512, 1024, 512, 2],
                     [int(1024 * scale), 1024, 1024, 1024, 1]]
 
-        self.blocks = nn.Sequential(*[
+        self.blocks = nn.Sequential(* [
             DepthwiseSeparable(
                 num_channels=params[0],
                 num_filters1=params[1],
@@ -145,9 +156,11 @@ class MobileNet(TheseusLayer):
             int(1024 * scale),
             class_num,
             weight_attr=ParamAttr(initializer=KaimingNormal()))
-        if return_patterns is not None:
-            self.update_res(return_patterns)
-            self.register_forward_post_hook(self._return_dict_hook)
+
+        super().init_res(
+            stages_pattern,
+            return_patterns=return_patterns,
+            return_stages=return_stages)
 
     def forward(self, x):
         x = self.conv(x)
@@ -181,7 +194,10 @@ def MobileNetV1_x0_25(pretrained=False, use_ssld=False, **kwargs):
     Returns:
         model: nn.Layer. Specific `MobileNetV1_x0_25` model depends on args.
     """
-    model = MobileNet(scale=0.25, **kwargs)
+    model = MobileNet(
+        scale=0.25,
+        stages_pattern=MODEL_STAGES_PATTERN["MobileNetV1"],
+        **kwargs)
     _load_pretrained(pretrained, model, MODEL_URLS["MobileNetV1_x0_25"],
                      use_ssld)
     return model
@@ -197,7 +213,10 @@ def MobileNetV1_x0_5(pretrained=False, use_ssld=False, **kwargs):
     Returns:
         model: nn.Layer. Specific `MobileNetV1_x0_5` model depends on args.
     """
-    model = MobileNet(scale=0.5, **kwargs)
+    model = MobileNet(
+        scale=0.5,
+        stages_pattern=MODEL_STAGES_PATTERN["MobileNetV1"],
+        **kwargs)
     _load_pretrained(pretrained, model, MODEL_URLS["MobileNetV1_x0_5"],
                      use_ssld)
     return model
@@ -213,7 +232,10 @@ def MobileNetV1_x0_75(pretrained=False, use_ssld=False, **kwargs):
     Returns:
         model: nn.Layer. Specific `MobileNetV1_x0_75` model depends on args.
     """
-    model = MobileNet(scale=0.75, **kwargs)
+    model = MobileNet(
+        scale=0.75,
+        stages_pattern=MODEL_STAGES_PATTERN["MobileNetV1"],
+        **kwargs)
     _load_pretrained(pretrained, model, MODEL_URLS["MobileNetV1_x0_75"],
                      use_ssld)
     return model
@@ -229,6 +251,9 @@ def MobileNetV1(pretrained=False, use_ssld=False, **kwargs):
     Returns:
         model: nn.Layer. Specific `MobileNetV1` model depends on args.
     """
-    model = MobileNet(scale=1.0, **kwargs)
+    model = MobileNet(
+        scale=1.0,
+        stages_pattern=MODEL_STAGES_PATTERN["MobileNetV1"],
+        **kwargs)
     _load_pretrained(pretrained, model, MODEL_URLS["MobileNetV1"], use_ssld)
     return model

@@ -12,17 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# reference: https://arxiv.org/pdf/1512.03385
+
 from __future__ import absolute_import, division, print_function
 
 import numpy as np
 import paddle
 from paddle import ParamAttr
 import paddle.nn as nn
-from paddle.nn import Conv2D, BatchNorm, Linear
+from paddle.nn import Conv2D, BatchNorm, Linear, BatchNorm2D
 from paddle.nn import AdaptiveAvgPool2D, MaxPool2D, AvgPool2D
 from paddle.nn.initializer import Uniform
+from paddle.regularizer import L2Decay
 import math
 
+from ppcls.utils import logger
 from ppcls.arch.backbone.base.theseus_layer import TheseusLayer
 from ppcls.utils.save_load import load_dygraph_pretrain, load_dygraph_pretrain_from_url
 
@@ -49,6 +53,15 @@ MODEL_URLS = {
     "https://paddle-imagenet-models-name.bj.bcebos.com/dygraph/legendary_models/ResNet152_vd_pretrained.pdparams",
     "ResNet200_vd":
     "https://paddle-imagenet-models-name.bj.bcebos.com/dygraph/legendary_models/ResNet200_vd_pretrained.pdparams",
+}
+
+MODEL_STAGES_PATTERN = {
+    "ResNet18": ["blocks[1]", "blocks[3]", "blocks[5]", "blocks[7]"],
+    "ResNet34": ["blocks[2]", "blocks[6]", "blocks[12]", "blocks[15]"],
+    "ResNet50": ["blocks[2]", "blocks[6]", "blocks[12]", "blocks[15]"],
+    "ResNet101": ["blocks[2]", "blocks[6]", "blocks[29]", "blocks[32]"],
+    "ResNet152": ["blocks[2]", "blocks[10]", "blocks[46]", "blocks[49]"],
+    "ResNet200": ["blocks[2]", "blocks[14]", "blocks[62]", "blocks[65]"]
 }
 
 __all__ = MODEL_URLS.keys()
@@ -110,17 +123,18 @@ class ConvBNLayer(TheseusLayer):
         self.is_vd_mode = is_vd_mode
         self.act = act
         self.avg_pool = AvgPool2D(
-            kernel_size=2, stride=2, padding=0, ceil_mode=True)
+            kernel_size=2, stride=stride, padding="SAME", ceil_mode=True)
         self.conv = Conv2D(
             in_channels=num_channels,
             out_channels=num_filters,
             kernel_size=filter_size,
-            stride=stride,
+            stride=1 if is_vd_mode else stride,
             padding=(filter_size - 1) // 2,
             groups=groups,
             weight_attr=ParamAttr(learning_rate=lr_mult),
             bias_attr=False,
             data_format=data_format)
+
         self.bn = BatchNorm(
             num_filters,
             param_attr=ParamAttr(learning_rate=lr_mult),
@@ -148,7 +162,6 @@ class BottleneckBlock(TheseusLayer):
                  lr_mult=1.0,
                  data_format="NCHW"):
         super().__init__()
-
         self.conv0 = ConvBNLayer(
             num_channels=num_channels,
             num_filters=num_filters,
@@ -177,10 +190,11 @@ class BottleneckBlock(TheseusLayer):
                 num_channels=num_channels,
                 num_filters=num_filters * 4,
                 filter_size=1,
-                stride=stride if if_first else 1,
+                stride=stride,
                 is_vd_mode=False if if_first else True,
                 lr_mult=lr_mult,
                 data_format=data_format)
+
         self.relu = nn.ReLU()
         self.shortcut = shortcut
 
@@ -231,7 +245,7 @@ class BasicBlock(TheseusLayer):
                 num_channels=num_channels,
                 num_filters=num_filters,
                 filter_size=1,
-                stride=stride if if_first else 1,
+                stride=stride,
                 is_vd_mode=False if if_first else True,
                 lr_mult=lr_mult,
                 data_format=data_format)
@@ -265,16 +279,22 @@ class ResNet(TheseusLayer):
 
     def __init__(self,
                  config,
+                 stages_pattern,
                  version="vb",
+                 stem_act="relu",
                  class_num=1000,
                  lr_mult_list=[1.0, 1.0, 1.0, 1.0, 1.0],
+                 stride_list=[2, 2, 2, 2, 2],
                  data_format="NCHW",
                  input_image_channel=3,
-                 return_patterns=None):
+                 return_patterns=None,
+                 return_stages=None,
+                 **kargs):
         super().__init__()
 
         self.cfg = config
         self.lr_mult_list = lr_mult_list
+        self.stride_list = stride_list
         self.is_vd_mode = version == "vd"
         self.class_num = class_num
         self.num_filters = [64, 128, 256, 512]
@@ -287,31 +307,44 @@ class ResNet(TheseusLayer):
             list, tuple
         )), "lr_mult_list should be in (list, tuple) but got {}".format(
             type(self.lr_mult_list))
-        assert len(self.lr_mult_list
-                   ) == 5, "lr_mult_list length should be 5 but got {}".format(
-                       len(self.lr_mult_list))
+        if len(self.lr_mult_list) != 5:
+            msg = "lr_mult_list length should be 5 but got {}, default lr_mult_list used".format(
+                len(self.lr_mult_list))
+            logger.warning(msg)
+            self.lr_mult_list = [1.0, 1.0, 1.0, 1.0, 1.0]
+
+        assert isinstance(self.stride_list, (
+            list, tuple
+        )), "stride_list should be in (list, tuple) but got {}".format(
+            type(self.stride_list))
+        assert len(self.stride_list
+                   ) == 5, "stride_list length should be 5 but got {}".format(
+                       len(self.stride_list))
 
         self.stem_cfg = {
             #num_channels, num_filters, filter_size, stride
-            "vb": [[input_image_channel, 64, 7, 2]],
-            "vd":
-            [[input_image_channel, 32, 3, 2], [32, 32, 3, 1], [32, 64, 3, 1]]
+            "vb": [[input_image_channel, 64, 7, self.stride_list[0]]],
+            "vd": [[input_image_channel, 32, 3, self.stride_list[0]],
+                   [32, 32, 3, 1], [32, 64, 3, 1]]
         }
 
-        self.stem = nn.Sequential(* [
+        self.stem = nn.Sequential(*[
             ConvBNLayer(
                 num_channels=in_c,
                 num_filters=out_c,
                 filter_size=k,
                 stride=s,
-                act="relu",
+                act=stem_act,
                 lr_mult=self.lr_mult_list[0],
                 data_format=data_format)
             for in_c, out_c, k, s in self.stem_cfg[version]
         ])
 
         self.max_pool = MaxPool2D(
-            kernel_size=3, stride=2, padding=1, data_format=data_format)
+            kernel_size=3,
+            stride=stride_list[1],
+            padding=1,
+            data_format=data_format)
         block_list = []
         for block_idx in range(len(self.block_depth)):
             shortcut = False
@@ -320,7 +353,8 @@ class ResNet(TheseusLayer):
                     num_channels=self.num_channels[block_idx] if i == 0 else
                     self.num_filters[block_idx] * self.channels_mult,
                     num_filters=self.num_filters[block_idx],
-                    stride=2 if i == 0 and block_idx != 0 else 1,
+                    stride=self.stride_list[block_idx + 1]
+                    if i == 0 and block_idx != 0 else 1,
                     shortcut=shortcut,
                     if_first=block_idx == i == 0 if version == "vd" else True,
                     lr_mult=self.lr_mult_list[block_idx + 1],
@@ -338,9 +372,11 @@ class ResNet(TheseusLayer):
             weight_attr=ParamAttr(initializer=Uniform(-stdv, stdv)))
 
         self.data_format = data_format
-        if return_patterns is not None:
-            self.update_res(return_patterns)
-            self.register_forward_post_hook(self._return_dict_hook)
+
+        super().init_res(
+            stages_pattern,
+            return_patterns=return_patterns,
+            return_stages=return_stages)
 
     def forward(self, x):
         with paddle.static.amp.fp16_guard():
@@ -362,7 +398,10 @@ def _load_pretrained(pretrained, model, model_url, use_ssld):
     elif pretrained is True:
         load_dygraph_pretrain_from_url(model, model_url, use_ssld=use_ssld)
     elif isinstance(pretrained, str):
-        load_dygraph_pretrain(model, pretrained)
+        if 'http' in pretrained:
+            load_dygraph_pretrain_from_url(model, pretrained, use_ssld=False)
+        else:
+            load_dygraph_pretrain(model, pretrained)
     else:
         raise RuntimeError(
             "pretrained type is not available. Please use `string` or `boolean` type."
@@ -379,7 +418,11 @@ def ResNet18(pretrained=False, use_ssld=False, **kwargs):
     Returns:
         model: nn.Layer. Specific `ResNet18` model depends on args.
     """
-    model = ResNet(config=NET_CONFIG["18"], version="vb", **kwargs)
+    model = ResNet(
+        config=NET_CONFIG["18"],
+        stages_pattern=MODEL_STAGES_PATTERN["ResNet18"],
+        version="vb",
+        **kwargs)
     _load_pretrained(pretrained, model, MODEL_URLS["ResNet18"], use_ssld)
     return model
 
@@ -394,7 +437,11 @@ def ResNet18_vd(pretrained=False, use_ssld=False, **kwargs):
     Returns:
         model: nn.Layer. Specific `ResNet18_vd` model depends on args.
     """
-    model = ResNet(config=NET_CONFIG["18"], version="vd", **kwargs)
+    model = ResNet(
+        config=NET_CONFIG["18"],
+        stages_pattern=MODEL_STAGES_PATTERN["ResNet18"],
+        version="vd",
+        **kwargs)
     _load_pretrained(pretrained, model, MODEL_URLS["ResNet18_vd"], use_ssld)
     return model
 
@@ -409,7 +456,11 @@ def ResNet34(pretrained=False, use_ssld=False, **kwargs):
     Returns:
         model: nn.Layer. Specific `ResNet34` model depends on args.
     """
-    model = ResNet(config=NET_CONFIG["34"], version="vb", **kwargs)
+    model = ResNet(
+        config=NET_CONFIG["34"],
+        stages_pattern=MODEL_STAGES_PATTERN["ResNet34"],
+        version="vb",
+        **kwargs)
     _load_pretrained(pretrained, model, MODEL_URLS["ResNet34"], use_ssld)
     return model
 
@@ -424,7 +475,11 @@ def ResNet34_vd(pretrained=False, use_ssld=False, **kwargs):
     Returns:
         model: nn.Layer. Specific `ResNet34_vd` model depends on args.
     """
-    model = ResNet(config=NET_CONFIG["34"], version="vd", **kwargs)
+    model = ResNet(
+        config=NET_CONFIG["34"],
+        stages_pattern=MODEL_STAGES_PATTERN["ResNet34"],
+        version="vd",
+        **kwargs)
     _load_pretrained(pretrained, model, MODEL_URLS["ResNet34_vd"], use_ssld)
     return model
 
@@ -439,7 +494,11 @@ def ResNet50(pretrained=False, use_ssld=False, **kwargs):
     Returns:
         model: nn.Layer. Specific `ResNet50` model depends on args.
     """
-    model = ResNet(config=NET_CONFIG["50"], version="vb", **kwargs)
+    model = ResNet(
+        config=NET_CONFIG["50"],
+        stages_pattern=MODEL_STAGES_PATTERN["ResNet50"],
+        version="vb",
+        **kwargs)
     _load_pretrained(pretrained, model, MODEL_URLS["ResNet50"], use_ssld)
     return model
 
@@ -454,7 +513,11 @@ def ResNet50_vd(pretrained=False, use_ssld=False, **kwargs):
     Returns:
         model: nn.Layer. Specific `ResNet50_vd` model depends on args.
     """
-    model = ResNet(config=NET_CONFIG["50"], version="vd", **kwargs)
+    model = ResNet(
+        config=NET_CONFIG["50"],
+        stages_pattern=MODEL_STAGES_PATTERN["ResNet50"],
+        version="vd",
+        **kwargs)
     _load_pretrained(pretrained, model, MODEL_URLS["ResNet50_vd"], use_ssld)
     return model
 
@@ -469,7 +532,11 @@ def ResNet101(pretrained=False, use_ssld=False, **kwargs):
     Returns:
         model: nn.Layer. Specific `ResNet101` model depends on args.
     """
-    model = ResNet(config=NET_CONFIG["101"], version="vb", **kwargs)
+    model = ResNet(
+        config=NET_CONFIG["101"],
+        stages_pattern=MODEL_STAGES_PATTERN["ResNet101"],
+        version="vb",
+        **kwargs)
     _load_pretrained(pretrained, model, MODEL_URLS["ResNet101"], use_ssld)
     return model
 
@@ -484,7 +551,11 @@ def ResNet101_vd(pretrained=False, use_ssld=False, **kwargs):
     Returns:
         model: nn.Layer. Specific `ResNet101_vd` model depends on args.
     """
-    model = ResNet(config=NET_CONFIG["101"], version="vd", **kwargs)
+    model = ResNet(
+        config=NET_CONFIG["101"],
+        stages_pattern=MODEL_STAGES_PATTERN["ResNet101"],
+        version="vd",
+        **kwargs)
     _load_pretrained(pretrained, model, MODEL_URLS["ResNet101_vd"], use_ssld)
     return model
 
@@ -499,7 +570,11 @@ def ResNet152(pretrained=False, use_ssld=False, **kwargs):
     Returns:
         model: nn.Layer. Specific `ResNet152` model depends on args.
     """
-    model = ResNet(config=NET_CONFIG["152"], version="vb", **kwargs)
+    model = ResNet(
+        config=NET_CONFIG["152"],
+        stages_pattern=MODEL_STAGES_PATTERN["ResNet152"],
+        version="vb",
+        **kwargs)
     _load_pretrained(pretrained, model, MODEL_URLS["ResNet152"], use_ssld)
     return model
 
@@ -514,7 +589,11 @@ def ResNet152_vd(pretrained=False, use_ssld=False, **kwargs):
     Returns:
         model: nn.Layer. Specific `ResNet152_vd` model depends on args.
     """
-    model = ResNet(config=NET_CONFIG["152"], version="vd", **kwargs)
+    model = ResNet(
+        config=NET_CONFIG["152"],
+        stages_pattern=MODEL_STAGES_PATTERN["ResNet152"],
+        version="vd",
+        **kwargs)
     _load_pretrained(pretrained, model, MODEL_URLS["ResNet152_vd"], use_ssld)
     return model
 
@@ -529,6 +608,10 @@ def ResNet200_vd(pretrained=False, use_ssld=False, **kwargs):
     Returns:
         model: nn.Layer. Specific `ResNet200_vd` model depends on args.
     """
-    model = ResNet(config=NET_CONFIG["200"], version="vd", **kwargs)
+    model = ResNet(
+        config=NET_CONFIG["200"],
+        stages_pattern=MODEL_STAGES_PATTERN["ResNet200"],
+        version="vd",
+        **kwargs)
     _load_pretrained(pretrained, model, MODEL_URLS["ResNet200_vd"], use_ssld)
     return model

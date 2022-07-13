@@ -41,25 +41,37 @@ def train_epoch(engine, epoch_id, print_batch_step):
 
         # image input
         if engine.amp:
-            with paddle.amp.auto_cast(custom_black_list={
-                    "flatten_contiguous_range", "greater_than"
-            }):
+            amp_level = engine.config['AMP'].get("level", "O1").upper()
+            with paddle.amp.auto_cast(
+                    custom_black_list={
+                        "flatten_contiguous_range", "greater_than"
+                    },
+                    level=amp_level):
                 out = forward(engine, batch)
+                loss_dict = engine.train_loss_func(out, batch[1])
         else:
             out = forward(engine, batch)
+            loss_dict = engine.train_loss_func(out, batch[1])
 
-        loss_dict = engine.train_loss_func(out, batch[1])
-
-        # step opt and lr
+        # backward & step opt
         if engine.amp:
             scaled = engine.scaler.scale(loss_dict["loss"])
             scaled.backward()
-            engine.scaler.minimize(engine.optimizer, scaled)
+            for i in range(len(engine.optimizer)):
+                engine.scaler.minimize(engine.optimizer[i], scaled)
         else:
             loss_dict["loss"].backward()
-            engine.optimizer.step()
-        engine.optimizer.clear_grad()
-        engine.lr_sch.step()
+            for i in range(len(engine.optimizer)):
+                engine.optimizer[i].step()
+
+        # clear grad
+        for i in range(len(engine.optimizer)):
+            engine.optimizer[i].clear_grad()
+
+        # step lr(by step)
+        for i in range(len(engine.lr_sch)):
+            if not getattr(engine.lr_sch[i], "by_epoch", False):
+                engine.lr_sch[i].step()
 
         # below code just for logging
         # update metric_for_logger
@@ -70,6 +82,11 @@ def train_epoch(engine, epoch_id, print_batch_step):
         if iter_id % print_batch_step == 0:
             log_info(engine, batch_size, epoch_id, iter_id)
         tic = time.time()
+
+    # step lr(by epoch)
+    for i in range(len(engine.lr_sch)):
+        if getattr(engine.lr_sch[i], "by_epoch", False):
+            engine.lr_sch[i].step()
 
 
 def forward(engine, batch):
