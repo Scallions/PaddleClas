@@ -1,17 +1,11 @@
 #!/bin/bash
-source test_tipc/common_func.sh 
+source test_tipc/common_func.sh
 
 FILENAME=$1
-
-dataline=$(cat ${FILENAME})
-lines=(${dataline})
-# common params
-model_name=$(func_parser_value "${lines[1]}")
-python=$(func_parser_value "${lines[2]}")
-
+MODE=$2
 
 # parser params
-dataline=$(awk 'NR==1, NR==12{print}'  $FILENAME)
+dataline=$(awk 'NR==1, NR==16{print}'  $FILENAME)
 IFS=$'\n'
 lines=(${dataline})
 
@@ -31,17 +25,19 @@ opset_version_key=$(func_parser_key "${lines[8]}")
 opset_version_value=$(func_parser_value "${lines[8]}")
 enable_onnx_checker_key=$(func_parser_key "${lines[9]}")
 enable_onnx_checker_value=$(func_parser_value "${lines[9]}")
-# parser onnx inference 
-inference_py=$(func_parser_value "${lines[10]}")
-use_gpu_key=$(func_parser_key "${lines[11]}")
-use_gpu_value=$(func_parser_value "${lines[11]}")
-det_model_key=$(func_parser_key "${lines[12]}")
-image_dir_key=$(func_parser_key "${lines[13]}")
-image_dir_value=$(func_parser_value "${lines[13]}")
+# parser onnx inference
+inference_py=$(func_parser_value "${lines[11]}")
+use_onnx_key=$(func_parser_key "${lines[12]}")
+use_onnx_value=$(func_parser_value "${lines[12]}")
+inference_model_dir_key=$(func_parser_key "${lines[13]}")
+inference_model_dir_value=$(func_parser_value "${lines[13]}")
+inference_hardware_key=$(func_parser_key "${lines[14]}")
+inference_hardware_value=$(func_parser_value "${lines[14]}")
+inference_config_key=$(func_parser_key "${lines[15]}")
+inference_config_value=$(func_parser_value "${lines[15]}")
 
-
-LOG_PATH="./test_tipc/output"
-mkdir -p ./test_tipc/output
+LOG_PATH="./test_tipc/output/${model_name}/${MODE}"
+mkdir -p ${LOG_PATH}
 status_log="${LOG_PATH}/results_paddle2onnx.log"
 
 
@@ -50,7 +46,7 @@ function func_paddle2onnx(){
     _script=$1
 
     # paddle2onnx
-    _save_log_path="${LOG_PATH}/paddle2onnx_infer_cpu.log"
+    _save_log_path=".${LOG_PATH}/paddle2onnx_infer_cpu.log"
     set_dirname=$(func_set_params "${infer_model_dir_key}" "${infer_model_dir_value}")
     set_model_filename=$(func_set_params "${model_filename_key}" "${model_filename_value}")
     set_params_filename=$(func_set_params "${params_filename_key}" "${params_filename_value}")
@@ -60,14 +56,16 @@ function func_paddle2onnx(){
     trans_model_cmd="${padlle2onnx_cmd} ${set_dirname} ${set_model_filename} ${set_params_filename} ${set_save_model} ${set_opset_version} ${set_enable_onnx_checker}"
     eval $trans_model_cmd
     last_status=${PIPESTATUS[0]}
-    status_check $last_status "${trans_model_cmd}" "${status_log}"
+    status_check $last_status "${trans_model_cmd}" "${status_log}" "${model_name}"
+
     # python inference
-    set_gpu=$(func_set_params "${use_gpu_key}" "${use_gpu_value}")
-    set_model_dir=$(func_set_params "${det_model_key}" "${save_file_value}")
-    set_img_dir=$(func_set_params "${image_dir_key}" "${image_dir_value}")
-    infer_model_cmd="${python} ${inference_py} ${set_gpu} ${set_img_dir} ${set_model_dir} --use_onnx=True > ${_save_log_path} 2>&1 "
+    set_model_dir=$(func_set_params "${inference_model_dir_key}" "${inference_model_dir_value}")
+    set_use_onnx=$(func_set_params "${use_onnx_key}" "${use_onnx_value}")
+    set_hardware=$(func_set_params "${inference_hardware_key}" "${inference_hardware_value}")
+    set_inference_config=$(func_set_params "${inference_config_key}" "${inference_config_value}")
+    infer_model_cmd="cd deploy && ${python} ${inference_py} -o ${set_model_dir} -o ${set_use_onnx} -o ${set_hardware} ${set_inference_config} > ${_save_log_path} 2>&1 && cd ../"
     eval $infer_model_cmd
-    status_check $last_status "${infer_model_cmd}" "${status_log}"
+    status_check $last_status "${infer_model_cmd}" "${status_log}" "${model_name}"
 }
 
 
@@ -75,4 +73,4 @@ echo "################### run test ###################"
 
 export Count=0
 IFS="|"
-func_paddle2onnx 
+func_paddle2onnx

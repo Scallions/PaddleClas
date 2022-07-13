@@ -158,7 +158,7 @@ def create_strategy(config):
     exec_strategy.num_threads = 1
     exec_strategy.num_iteration_per_drop_scope = (
         10000
-        if 'AMP' in config and config.AMP.get("use_pure_fp16", False) else 10)
+        if 'AMP' in config and config.AMP.get("level", "O1") == "O2" else 10)
 
     fuse_op = True if 'AMP' in config else False
 
@@ -206,7 +206,7 @@ def mixed_precision_optimizer(config, optimizer):
         scale_loss = amp_cfg.get('scale_loss', 1.0)
         use_dynamic_loss_scaling = amp_cfg.get('use_dynamic_loss_scaling',
                                                False)
-        use_pure_fp16 = amp_cfg.get('use_pure_fp16', False)
+        use_pure_fp16 = amp_cfg.get("level", "O1") == "O2"
         optimizer = paddle.static.amp.decorate(
             optimizer,
             init_loss_scaling=scale_loss,
@@ -371,6 +371,11 @@ def run(dataloader,
                 "Except RuntimeError when reading data from dataloader, try to read once again..."
             )
             continue
+        except IndexError:
+            logger.warning(
+                "Except IndexError when reading data from dataloader, try to read once again..."
+            )
+            continue
         idx += 1
         # ignore the warmup iters
         if idx == 5:
@@ -406,7 +411,7 @@ def run(dataloader,
             if "time" in key else str(metric_dict[key].value)
             for key in metric_dict
         ])
-        ips_info = " ips: {:.5f} images/sec.".format(
+        ips_info = " ips: {:.5f} samples/sec.".format(
             batch_size / metric_dict["batch_time"].avg)
         fetchs_str += ips_info
 
@@ -433,14 +438,13 @@ def run(dataloader,
 
     end_str = ' '.join([str(m.mean) for m in metric_dict.values()] +
                        [metric_dict["batch_time"].total])
-    ips_info = "ips: {:.5f} images/sec.".format(batch_size /
-                                                metric_dict["batch_time"].avg)
+    ips_info = "ips: {:.5f} samples/sec.".format(batch_size /
+                                                 metric_dict["batch_time"].avg)
     if mode == 'eval':
         logger.info("END {:s} {:s} {:s}".format(mode, end_str, ips_info))
     else:
         end_epoch_str = "END epoch:{:<3d}".format(epoch)
-        logger.info("{:s} {:s} {:s} {:s}".format(end_epoch_str, mode, end_str,
-                                                 ips_info))
+        logger.info("{:s} {:s} {:s}".format(end_epoch_str, mode, end_str))
     if use_dali:
         dataloader.reset()
 

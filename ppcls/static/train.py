@@ -71,7 +71,7 @@ def main(args):
 
     log_file = os.path.join(global_config['output_dir'],
                             config["Arch"]["name"], f"{mode}.log")
-    init_logger(name='root', log_file=log_file)
+    init_logger(log_file=log_file)
     print_config(config)
 
     if global_config.get("is_distributed", True):
@@ -81,20 +81,20 @@ def main(args):
     # amp related config
     if 'AMP' in config:
         AMP_RELATED_FLAGS_SETTING = {
-            'FLAGS_cudnn_exhaustive_search': "1",
-            'FLAGS_conv_workspace_size_limit': "1500",
-            'FLAGS_cudnn_batchnorm_spatial_persistent': "1",
-            'FLAGS_max_indevice_grad_add': "8",
-            "FLAGS_cudnn_batchnorm_spatial_persistent": "1",
+            'FLAGS_cudnn_exhaustive_search': 1,
+            'FLAGS_conv_workspace_size_limit': 1500,
+            'FLAGS_cudnn_batchnorm_spatial_persistent': 1,
+            'FLAGS_max_inplace_grad_add': 8,
         }
-        for k in AMP_RELATED_FLAGS_SETTING:
-            os.environ[k] = AMP_RELATED_FLAGS_SETTING[k]
+        os.environ['FLAGS_cudnn_batchnorm_spatial_persistent'] = '1'
+        paddle.set_flags(AMP_RELATED_FLAGS_SETTING)
 
     use_xpu = global_config.get("use_xpu", False)
     use_npu = global_config.get("use_npu", False)
+    use_mlu = global_config.get("use_mlu", False)
     assert (
-        use_gpu and use_xpu and use_npu
-    ) is not True, "gpu, xpu and npu can not be true in the same time in static mode!"
+        use_gpu and use_xpu and use_npu and use_mlu
+    ) is not True, "gpu, xpu, npu and mlu can not be true in the same time in static mode!"
 
     if use_gpu:
         device = paddle.set_device('gpu')
@@ -102,6 +102,8 @@ def main(args):
         device = paddle.set_device('xpu')
     elif use_npu:
         device = paddle.set_device('npu')
+    elif use_mlu:
+        device = paddle.set_device('mlu')
     else:
         device = paddle.set_device('cpu')
 
@@ -159,12 +161,22 @@ def main(args):
     # load pretrained models or checkpoints
     init_model(global_config, train_prog, exe)
 
-    if 'AMP' in config and config.AMP.get("use_pure_fp16", False):
+    if 'AMP' in config:
+        if config["AMP"].get("level", "O1").upper() == "O2":
+            use_fp16_test = True
+            msg = "Only support FP16 evaluation when AMP O2 is enabled."
+            logger.warning(msg)
+        elif "use_fp16_test" in config["AMP"]:
+            use_fp16_test = config["AMP"].get["use_fp16_test"]
+        else:
+            use_fp16_test = False
+
         optimizer.amp_init(
             device,
             scope=paddle.static.global_scope(),
             test_program=eval_prog
-            if global_config["eval_during_train"] else None)
+            if global_config["eval_during_train"] else None,
+            use_fp16_test=use_fp16_test)
 
     if not global_config.get("is_distributed", True):
         compiled_train_prog = program.compile(
@@ -180,7 +192,7 @@ def main(args):
         program.run(train_dataloader, exe, compiled_train_prog, train_feeds,
                     train_fetchs, epoch_id, 'train', config, vdl_writer,
                     lr_scheduler, args.profiler_options)
-        # 2. evaate with eval dataset
+        # 2. evaluate with eval dataset
         if global_config["eval_during_train"] and epoch_id % global_config[
                 "eval_interval"] == 0:
             top1_acc = program.run(eval_dataloader, exe, compiled_eval_prog,

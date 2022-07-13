@@ -109,17 +109,16 @@ class DetPredictor(Predictor):
         '''
         inputs = self.preprocess(image)
         np_boxes = None
-        input_names = self.paddle_predictor.get_input_names()
+        input_names = self.predictor.get_input_names()
 
         for i in range(len(input_names)):
-            input_tensor = self.paddle_predictor.get_input_handle(input_names[
-                i])
+            input_tensor = self.predictor.get_input_handle(input_names[i])
             input_tensor.copy_from_cpu(inputs[input_names[i]])
 
         t1 = time.time()
-        self.paddle_predictor.run()
-        output_names = self.paddle_predictor.get_output_names()
-        boxes_tensor = self.paddle_predictor.get_output_handle(output_names[0])
+        self.predictor.run()
+        output_names = self.predictor.get_output_names()
+        boxes_tensor = self.predictor.get_output_handle(output_names[0])
         np_boxes = boxes_tensor.copy_to_cpu()
         t2 = time.time()
 
@@ -129,13 +128,10 @@ class DetPredictor(Predictor):
         results = []
         if reduce(lambda x, y: x * y, np_boxes.shape) < 6:
             print('[WARNNING] No object detected.')
-            results = np.array([])
         else:
-            results = np_boxes
-
-        results = self.parse_det_results(results,
-                                         self.config["Global"]["threshold"],
-                                         self.config["Global"]["labe_list"])
+            results = self.parse_det_results(
+                np_boxes, self.config["Global"]["threshold"],
+                self.config["Global"]["label_list"])
         return results
 
 
